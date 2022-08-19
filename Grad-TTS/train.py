@@ -76,12 +76,12 @@ if __name__ == "__main__":
                                   win_length, f_min, f_max)
 
     print('Initializing model...')
-    model = GradTTS(nsymbols, 1, None, n_enc_channels, filter_channels, filter_channels_dp, 
-                    n_heads, n_enc_layers, enc_kernel, enc_dropout, window_size, 
+    model = GradTTS(nsymbols, 1, None, n_enc_channels, filter_channels, filter_channels_dp,
+                    n_heads, n_enc_layers, enc_kernel, enc_dropout, window_size,
                     n_feats, dec_dim, beta_min, beta_max, pe_scale).cuda()
-    print('Number of encoder + duration predictor parameters: %.2fm' % (model.encoder.nparams/1e6))
-    print('Number of decoder parameters: %.2fm' % (model.decoder.nparams/1e6))
-    print('Total parameters: %.2fm' % (model.nparams/1e6))
+    print('Number of encoder + duration predictor parameters: %.2fm' % (model.encoder.nparams / 1e6))
+    print('Number of decoder parameters: %.2fm' % (model.decoder.nparams / 1e6))
+    print('Total parameters: %.2fm' % (model.nparams / 1e6))
 
     print('Initializing optimizer...')
     optimizer = torch.optim.Adam(params=model.parameters(), lr=learning_rate)
@@ -101,7 +101,7 @@ if __name__ == "__main__":
         dur_losses = []
         prior_losses = []
         diff_losses = []
-        with tqdm(loader, total=len(train_dataset)//batch_size) as progress_bar:
+        with tqdm(loader, total=len(train_dataset) // batch_size) as progress_bar:
             for batch_idx, batch in enumerate(progress_bar):
                 model.zero_grad()
                 x, x_lengths = batch['x'].cuda(), batch['x_lengths'].cuda()
@@ -128,15 +128,17 @@ if __name__ == "__main__":
                                   global_step=iteration)
                 logger.add_scalar('training/decoder_grad_norm', dec_grad_norm,
                                   global_step=iteration)
-                
+
                 dur_losses.append(dur_loss.item())
                 prior_losses.append(prior_loss.item())
                 diff_losses.append(diff_loss.item())
-                
+
                 if batch_idx % 5 == 0:
-                    msg = f'Epoch: {epoch}, iteration: {iteration} | dur_loss: {dur_loss.item()}, prior_loss: {prior_loss.item()}, diff_loss: {diff_loss.item()}'
+                    msg = 'Epoch: %d, iteration: %d | dur_loss: %.3f, prior_loss: %.3f, diff_loss: %.3f' % (
+                        epoch, iteration, dur_loss.item(), prior_loss.item(), diff_loss.item()
+                    )
                     progress_bar.set_description(msg)
-                
+
                 iteration += 1
 
         log_msg = 'Epoch %d: duration loss = %.3f ' % (epoch, np.mean(dur_losses))
@@ -164,11 +166,11 @@ if __name__ == "__main__":
                 logger.add_image(f'image_{i}/alignment',
                                  plot_tensor(attn.squeeze().cpu()),
                                  global_step=iteration, dataformats='HWC')
-                save_plot(y_enc.squeeze().cpu(), 
+                save_plot(y_enc.squeeze().cpu(),
                           f'{log_dir}/generated_enc_{i}.png')
-                save_plot(y_dec.squeeze().cpu(), 
+                save_plot(y_dec.squeeze().cpu(),
                           f'{log_dir}/generated_dec_{i}.png')
-                save_plot(attn.squeeze().cpu(), 
+                save_plot(attn.squeeze().cpu(),
                           f'{log_dir}/alignment_{i}.png')
 
         ckpt = model.state_dict()

@@ -49,7 +49,7 @@ class Rezero(BaseModule):
 class Block(BaseModule):
     def __init__(self, dim, dim_out, groups=8):
         super(Block, self).__init__()
-        self.block = torch.nn.Sequential(torch.nn.Conv2d(dim, dim_out, 3, 
+        self.block = torch.nn.Sequential(torch.nn.Conv2d(dim, dim_out, 3,
                                          padding=1), torch.nn.GroupNorm(
                                          groups, dim_out), Mish())
 
@@ -61,8 +61,7 @@ class Block(BaseModule):
 class ResnetBlock(BaseModule):
     def __init__(self, dim, dim_out, time_emb_dim, groups=8):
         super(ResnetBlock, self).__init__()
-        self.mlp = torch.nn.Sequential(Mish(), torch.nn.Linear(time_emb_dim, 
-                                                               dim_out))
+        self.mlp = torch.nn.Sequential(Mish(), torch.nn.Linear(time_emb_dim, dim_out))
 
         self.block1 = Block(dim, dim_out, groups=groups)
         self.block2 = Block(dim_out, dim_out, groups=groups)
@@ -85,17 +84,17 @@ class LinearAttention(BaseModule):
         self.heads = heads
         hidden_dim = dim_head * heads
         self.to_qkv = torch.nn.Conv2d(dim, hidden_dim * 3, 1, bias=False)
-        self.to_out = torch.nn.Conv2d(hidden_dim, dim, 1)            
+        self.to_out = torch.nn.Conv2d(hidden_dim, dim, 1)
 
     def forward(self, x):
         b, c, h, w = x.shape
         qkv = self.to_qkv(x)
-        q, k, v = rearrange(qkv, 'b (qkv heads c) h w -> qkv b heads c (h w)', 
-                            heads = self.heads, qkv=3)            
+        q, k, v = rearrange(qkv, 'b (qkv heads c) h w -> qkv b heads c (h w)',
+                            heads=self.heads, qkv=3)
         k = k.softmax(dim=-1)
         context = torch.einsum('bhdn,bhen->bhde', k, v)
         out = torch.einsum('bhde,bhdn->bhen', context, q)
-        out = rearrange(out, 'b heads c (h w) -> b (heads c) h w', 
+        out = rearrange(out, 'b heads c (h w) -> b (heads c) h w',
                         heads=self.heads, h=h, w=w)
         return self.to_out(out)
 
@@ -135,7 +134,7 @@ class GradLogPEstimator2d(BaseModule):
         self.n_spks = n_spks if not isinstance(n_spks, type(None)) else 1
         self.spk_emb_dim = spk_emb_dim
         self.pe_scale = pe_scale
-        
+
         if n_spks > 1:
             self.spk_mlp = torch.nn.Sequential(torch.nn.Linear(spk_emb_dim, spk_emb_dim * 4), Mish(),
                                                torch.nn.Linear(spk_emb_dim * 4, n_feats))
@@ -152,10 +151,11 @@ class GradLogPEstimator2d(BaseModule):
         for ind, (dim_in, dim_out) in enumerate(in_out):
             is_last = ind >= (num_resolutions - 1)
             self.downs.append(torch.nn.ModuleList([
-                       ResnetBlock(dim_in, dim_out, time_emb_dim=dim),
-                       ResnetBlock(dim_out, dim_out, time_emb_dim=dim),
-                       Residual(Rezero(LinearAttention(dim_out))),
-                       Downsample(dim_out) if not is_last else torch.nn.Identity()]))
+                ResnetBlock(dim_in, dim_out, time_emb_dim=dim),
+                ResnetBlock(dim_out, dim_out, time_emb_dim=dim),
+                Residual(Rezero(LinearAttention(dim_out))),
+                Downsample(dim_out) if not is_last else torch.nn.Identity()
+            ]))
 
         mid_dim = dims[-1]
         self.mid_block1 = ResnetBlock(mid_dim, mid_dim, time_emb_dim=dim)
@@ -164,17 +164,18 @@ class GradLogPEstimator2d(BaseModule):
 
         for ind, (dim_in, dim_out) in enumerate(reversed(in_out[1:])):
             self.ups.append(torch.nn.ModuleList([
-                     ResnetBlock(dim_out * 2, dim_in, time_emb_dim=dim),
-                     ResnetBlock(dim_in, dim_in, time_emb_dim=dim),
-                     Residual(Rezero(LinearAttention(dim_in))),
-                     Upsample(dim_in)]))
+                ResnetBlock(dim_out * 2, dim_in, time_emb_dim=dim),
+                ResnetBlock(dim_in, dim_in, time_emb_dim=dim),
+                Residual(Rezero(LinearAttention(dim_in))),
+                Upsample(dim_in)
+            ]))
         self.final_block = Block(dim, dim)
         self.final_conv = torch.nn.Conv2d(dim, 1, 1)
 
     def forward(self, x, mask, mu, t, spk=None):
         if not isinstance(spk, type(None)):
             s = self.spk_mlp(spk)
-        
+
         t = self.time_pos_emb(t, scale=self.pe_scale)
         t = self.mlp(t)
 
@@ -218,9 +219,9 @@ class GradLogPEstimator2d(BaseModule):
 
 def get_noise(t, beta_init, beta_term, cumulative=False):
     if cumulative:
-        noise = beta_init*t + 0.5*(beta_term - beta_init)*(t**2)
+        noise = beta_init * t + 0.5 * (beta_term - beta_init) * (t**2)
     else:
-        noise = beta_init + (beta_term - beta_init)*t
+        noise = beta_init + (beta_term - beta_init) * t
     return noise
 
 
@@ -236,7 +237,7 @@ class Diffusion(BaseModule):
         self.beta_min = beta_min
         self.beta_max = beta_max
         self.pe_scale = pe_scale
-        
+
         self.estimator = GradLogPEstimator2d(dim, n_spks=n_spks,
                                              spk_emb_dim=spk_emb_dim,
                                              pe_scale=pe_scale)
@@ -244,10 +245,9 @@ class Diffusion(BaseModule):
     def forward_diffusion(self, x0, mask, mu, t):
         time = t.unsqueeze(-1).unsqueeze(-1)
         cum_noise = get_noise(time, self.beta_min, self.beta_max, cumulative=True)
-        mean = x0*torch.exp(-0.5*cum_noise) + mu*(1.0 - torch.exp(-0.5*cum_noise))
+        mean = x0 * torch.exp(-0.5 * cum_noise) + mu * (1.0 - torch.exp(-0.5 * cum_noise))
         variance = 1.0 - torch.exp(-cum_noise)
-        z = torch.randn(x0.shape, dtype=x0.dtype, device=x0.device, 
-                        requires_grad=False)
+        z = torch.randn(x0.shape, dtype=x0.dtype, device=x0.device, requires_grad=False)
         xt = mean + z * torch.sqrt(variance)
         return xt * mask, z * mask
 
@@ -256,10 +256,9 @@ class Diffusion(BaseModule):
         h = 1.0 / n_timesteps
         xt = z * mask
         for i in range(n_timesteps):
-            t = (1.0 - (i + 0.5)*h) * torch.ones(z.shape[0], dtype=z.dtype, 
-                                                 device=z.device)
+            t = (1.0 - (i + 0.5) * h) * torch.ones(z.shape[0], dtype=z.dtype, device=z.device)
             time = t.unsqueeze(-1).unsqueeze(-1)
-            noise_t = get_noise(time, self.beta_min, self.beta_max, 
+            noise_t = get_noise(time, self.beta_min, self.beta_max,
                                 cumulative=False)
             if stoc:  # adds stochastic term
                 dxt_det = 0.5 * (mu - xt) - self.estimator(xt, mask, mu, t, spk)
@@ -284,7 +283,7 @@ class Diffusion(BaseModule):
         cum_noise = get_noise(time, self.beta_min, self.beta_max, cumulative=True)
         noise_estimation = self.estimator(xt, mask, mu, t, spk)
         noise_estimation *= torch.sqrt(1.0 - torch.exp(-cum_noise))
-        loss = torch.sum((noise_estimation + z)**2) / (torch.sum(mask)*self.n_feats)
+        loss = torch.sum((noise_estimation + z)**2) / (torch.sum(mask) * self.n_feats)
         return loss, xt
 
     def compute_loss(self, x0, mask, mu, spk=None, offset=1e-5):

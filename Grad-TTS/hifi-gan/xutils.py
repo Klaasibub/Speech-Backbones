@@ -6,6 +6,7 @@ import matplotlib
 import torch
 from torch.nn.utils import weight_norm
 matplotlib.use("Agg")
+
 import matplotlib.pylab as plt
 
 
@@ -57,4 +58,3 @@ def scan_checkpoint(cp_dir, prefix):
     if len(cp_list) == 0:
         return None
     return sorted(cp_list)[-1]
-

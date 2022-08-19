@@ -1,0 +1,7 @@
+__pycache__/
+monotonic_align/
+logs
+.vscode
+*.out
+out/
+checkpts/
