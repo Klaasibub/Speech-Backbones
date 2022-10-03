@@ -5,3 +5,6 @@ logs
 *.out
 out/
 checkpts/
+stressrnn/
+filelists/
+Models/

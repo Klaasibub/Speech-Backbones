@@ -6,16 +6,23 @@
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 # MIT License for more details.
 
+# srun -G 4 -c 16 -t 10-0 python3 -m torch.distributed.launch --nproc_per_node 4 train_multi_speaker.py
+
+import os
 import numpy as np
 from tqdm import tqdm
+import argparse
 
 import torch
+import torch.distributed as dist
 from torch.utils.data import DataLoader
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
+from apex.optimizers import FusedAdam, FusedLAMB
 
 import params
 from model import GradTTS
-from data import TextMelSpeakerDataset, TextMelSpeakerBatchCollate
+from data import TextMelSpeakerDataset, TextMelSpeakerBatchCollate, get_sampler
 from utils import plot_tensor, save_plot
 from text.symbols import symbols
 
@@ -58,58 +65,116 @@ beta_max = params.beta_max
 pe_scale = params.pe_scale
 
 
+def to_gpu(x):
+    x = x.contiguous()
+    return x.cuda(non_blocking=True) if torch.cuda.is_available() else x
+
+
+def init_distributed(args, world_size, rank):
+    assert torch.cuda.is_available(), "Distributed mode requires CUDA."
+    print(f"Initializing distributed training for {rank}")
+
+    # Set cuda device so everything is done on the right GPU.
+    torch.cuda.set_device(rank)
+
+    # Initialize distributed communication
+    dist.init_process_group(
+        backend=('nccl' if args.cuda else 'gloo'), init_method='env://',
+        rank=rank, world_size=world_size)
+    print("Done initializing distributed training")
+
+
+def log(*args, **kwargs):
+    if local_rank == 0:
+        print(*args, **kwargs)
+
+
 if __name__ == "__main__":
-    torch.manual_seed(random_seed)
-    np.random.seed(random_seed)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--local_rank", type=int, default=os.getenv('LOCAL_RANK', 0))
+    parser.add_argument("--world_size", type=int, default=os.getenv('WORLD_SIZE', 1))
+    args = parser.parse_args()
+    local_rank = args.local_rank
+    world_size = args.world_size
+    distributed_run = world_size > 1
 
-    print('Initializing logger...')
-    logger = SummaryWriter(log_dir=log_dir)
+    torch.manual_seed(random_seed + local_rank)
+    np.random.seed(random_seed + local_rank)
 
-    print('Initializing data loaders...')
+    if local_rank == 0:
+        if not os.path.exists(log_dir):
+            os.makedirs(log_dir)
+
+    if distributed_run:
+        init_distributed(params, world_size, local_rank)
+
+    log('Initializing logger...')
+    if local_rank == 0:
+        logger = SummaryWriter(log_dir=log_dir)
+
+    log('Initializing data loaders...')
     train_dataset = TextMelSpeakerDataset(train_filelist_path, cmudict_path, add_blank,
                                           n_fft, n_feats, sample_rate, hop_length,
                                           win_length, f_min, f_max)
+    train_sampler = get_sampler(train_dataset, distributed_run, params.n_spks)
+
     batch_collate = TextMelSpeakerBatchCollate()
     loader = DataLoader(dataset=train_dataset, batch_size=batch_size,
-                        collate_fn=batch_collate, drop_last=True,
-                        num_workers=8, shuffle=True)
+                        sampler=train_sampler, collate_fn=batch_collate, drop_last=True,
+                        num_workers=8, shuffle=False)
     test_dataset = TextMelSpeakerDataset(valid_filelist_path, cmudict_path, add_blank,
                                          n_fft, n_feats, sample_rate, hop_length,
                                          win_length, f_min, f_max)
 
-    print('Initializing model...')
+    log('Initializing model...')
+    device = torch.device("cuda" if torch.cuda.is_available() and getattr(params, 'cuda', True) else "cpu")
     model = GradTTS(nsymbols, n_spks, spk_emb_dim, n_enc_channels,
                     filter_channels, filter_channels_dp,
                     n_heads, n_enc_layers, enc_kernel, enc_dropout, window_size,
                     n_feats, dec_dim, beta_min, beta_max, pe_scale).cuda()
-    print('Number of encoder parameters = %.2fm' % (model.encoder.nparams / 1e6))
-    print('Number of decoder parameters = %.2fm' % (model.decoder.nparams / 1e6))
+    log('Number of encoder parameters = %.2fm' % (model.encoder.nparams / 1e6))
+    log('Number of decoder parameters = %.2fm' % (model.decoder.nparams / 1e6))
 
-    print('Initializing optimizer...')
-    optimizer = torch.optim.Adam(params=model.parameters(), lr=learning_rate)
+    log('Initializing optimizer...')
 
-    print('Logging test batch...')
-    test_batch = test_dataset.sample_test_batch(size=params.test_size)
-    for item in test_batch:
-        mel, spk = item['y'], item['spk']
-        i = int(spk.cpu())
-        logger.add_image(f'image_{i}/ground_truth', plot_tensor(mel.squeeze()),
-                         global_step=0, dataformats='HWC')
-        save_plot(mel.squeeze(), f'{log_dir}/original_{i}.png')
+    optimizer = FusedAdam(
+        model.parameters(), lr=params.learning_rate, betas=(0.9, 0.98), eps=1e-9, weight_decay=params.weight_decay
+    )
+    # optimizer = torch.optim.Adam(params=model.parameters(), lr=learning_rate)
 
-    print('Start training...')
+    if distributed_run:
+        model = DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
+
+    log('Logging test batch...')
+    if local_rank == 0:
+        test_batch = test_dataset.sample_test_batch(size=params.test_size)
+        for item in test_batch:
+            mel, spk = item['y'], item['spk']
+            i = int(spk.cpu())
+            logger.add_image(f'image_{i}/ground_truth', plot_tensor(mel.squeeze()),
+                             global_step=0, dataformats='HWC')
+            save_plot(mel.squeeze(), f'{log_dir}/original_{i}.png')
+
+    log('Start training...')
     iteration = 0
+    torch.cuda.synchronize()
     for epoch in range(1, n_epochs + 1):
+        if distributed_run:
+            loader.sampler.set_epoch(epoch)
+        if local_rank != 0:
+            continue
+
         model.eval()
-        print('Synthesis...')
+        log('Synthesis...')
         with torch.no_grad():
             for item in test_batch:
                 x = item['x'].to(torch.long).unsqueeze(0).cuda()
                 x_lengths = torch.LongTensor([x.shape[-1]]).cuda()
                 spk = item['spk'].to(torch.long).cuda()
+                spk_emb = item['spk_emb'].to(torch.long).cuda()
                 i = int(spk.cpu())
 
-                y_enc, y_dec, attn = model(x, x_lengths, n_timesteps=50, spk=spk)
+                y_enc, y_dec, attn = model(x, x_lengths, n_timesteps=50, spk_emb=spk_emb)
                 logger.add_image(f'image_{i}/generated_enc',
                                  plot_tensor(y_enc.squeeze().cpu()),
                                  global_step=iteration, dataformats='HWC')
@@ -130,9 +195,16 @@ if __name__ == "__main__":
         dur_losses = []
         prior_losses = []
         diff_losses = []
-        with tqdm(loader, total=len(train_dataset) // batch_size) as progress_bar:
-            for batch in progress_bar:
-                model.zero_grad()
+        torch.cuda.synchronize()
+        if local_rank == 0:
+            iterations = tqdm(loader, total=len(train_dataset) // (batch_size * world_size))
+        else:
+            iterations = loader
+        for batch in iterations:
+            model.zero_grad()
+            x, x_lengths = to_gpu(batch['x']), to_gpu(batch['x_lengths'])
+            y, y_lengths = to_gpu(batch['y']), to_gpu(batch['y_lengths'])
+            spk = to_gpu(batch['spk'])
             try:
                 dur_loss, prior_loss, diff_loss = model.compute_loss(x, x_lengths,
                                                                      y, y_lengths,
@@ -141,13 +213,18 @@ if __name__ == "__main__":
                 dur_loss, prior_loss, diff_loss = model.module.compute_loss(x, x_lengths,
                                                                             y, y_lengths,
                                                                             spk=spk, out_size=out_size)
-                loss = sum([dur_loss, prior_loss, diff_loss])
-                loss.backward()
+            loss = sum([dur_loss, prior_loss, diff_loss])
+            loss.backward()
 
+            try:
                 enc_grad_norm = torch.nn.utils.clip_grad_norm_(model.encoder.parameters(), max_norm=1)
                 dec_grad_norm = torch.nn.utils.clip_grad_norm_(model.decoder.parameters(), max_norm=1)
-                optimizer.step()
+            except AttributeError:
+                enc_grad_norm = torch.nn.utils.clip_grad_norm_(model.module.encoder.parameters(), max_norm=1)
+                dec_grad_norm = torch.nn.utils.clip_grad_norm_(model.module.decoder.parameters(), max_norm=1)
 
+            optimizer.step()
+            if local_rank == 0:
                 logger.add_scalar('training/duration_loss', dur_loss,
                                   global_step=iteration)
                 logger.add_scalar('training/prior_loss', prior_loss,
@@ -166,16 +243,17 @@ if __name__ == "__main__":
                 dur_losses.append(dur_loss.item())
                 prior_losses.append(prior_loss.item())
                 diff_losses.append(diff_loss.item())
-                iteration += 1
+            iteration += 1
 
-        msg = 'Epoch %d: duration loss = %.3f ' % (epoch, np.mean(dur_losses))
-        msg += '| prior loss = %.3f ' % np.mean(prior_losses)
-        msg += '| diffusion loss = %.3f\n' % np.mean(diff_losses)
-        with open(f'{log_dir}/train.log', 'a') as f:
-            f.write(msg)
+        if local_rank == 0:
+            msg = 'Epoch %d: duration loss = %.3f ' % (epoch, np.mean(dur_losses))
+            msg += '| prior loss = %.3f ' % np.mean(prior_losses)
+            msg += '| diffusion loss = %.3f\n' % np.mean(diff_losses)
+            with open(f'{log_dir}/train.log', 'a') as f:
+                f.write(msg)
 
-        if epoch % params.save_every > 0:
-            continue
+            if epoch % params.save_every > 0:
+                continue
 
-        ckpt = model.state_dict()
-        torch.save(ckpt, f=f"{log_dir}/grad_{epoch}.pt")
+            ckpt = model.state_dict()
+            torch.save(ckpt, f=f"{log_dir}/grad_{epoch}.pt")

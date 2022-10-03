@@ -10,14 +10,14 @@ from model.utils import fix_len_compatibility
 
 
 # data parameters
-train_filelist_path = 'filelists/ru_v3/train_embed_stress.txt'
-valid_filelist_path = 'filelists/ru_v3/val_embed_stress.txt'
-test_filelist_path = 'filelists/ru_v3/test_embed_stress.txt'
-cmudict_path = None  # 'resources/cmu_dictionary'
+train_filelist_path = '/home/zolkin/repo/FastPitch/filelists/ru_align/train.txt'
+valid_filelist_path = '/home/zolkin/repo/FastPitch/filelists/ru_align/val.txt'
+test_filelist_path = '/home/zolkin/repo/FastPitch/filelists/ru_align/test.txt'
+cmudict_path = 'resources/cmu_dictionary'
 add_blank = True
 n_feats = 80
 n_spks = 12  # 247 for Libri-TTS filelist and 1 for LJSpeech | and 12 for ru-custom
-spk_emb_dim = 64
+spk_emb_dim = 704  # 64
 n_feats = 80
 n_fft = 1024
 sample_rate = 22050
@@ -44,12 +44,12 @@ pe_scale = 1000  # 1 for `grad-tts-old.pt` checkpoint
 
 # training parameters
 cuda = True
-log_dir = 'logs/distributed'
+log_dir = 'logs/v3'
 test_size = 4
 n_epochs = 10000
-batch_size = 64
+batch_size = 32
 learning_rate = 1e-4
 weight_decay = 1e-6
 seed = 42
-save_every = 5
+save_every = 4
 out_size = fix_len_compatibility(2 * 22050 // 256)

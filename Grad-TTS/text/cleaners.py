@@ -71,3 +71,31 @@ def english_cleaners(text):
     text = expand_abbreviations(text)
     text = collapse_whitespace(text)
     return text
+
+
+def replace_symbols(text):
+    # TODO: maybe regexp
+    sym_map = {
+        '« ': '"',
+        ' »': '"',
+        '«': '"',
+        '»': '"',
+        '“': '"',
+        '”': '"',
+        '„': '"',
+        '“': '"',
+        '\'': '"',
+        '…': '.',
+        '–': '-',
+        '—': '-',
+    }
+    for sym in sym_map:
+        text = text.replace(sym, sym_map[sym])
+    return text
+
+
+def basic_custom(text):
+    text = lowercase(text)
+    text = replace_symbols(text)
+    text = collapse_whitespace(text)
+    return text
